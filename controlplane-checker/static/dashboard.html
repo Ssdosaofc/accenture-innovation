@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>controlplane-checker</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:            #f9f9f7;
+    --surface-1:       #fcfcfb;
+    --text-primary:    #0b0b0b;
+    --text-secondary:  #52514e;
+    --text-muted:      #898781;
+    --gridline:        #e1e0d9;
+    --border:          rgba(11, 11, 11, 0.10);
+    --status-good:     #0ca30c;
+    --status-warning:  #b8790f;   /* darkened vs the raw #fab219 chip so text stays legible on light */
+    --status-warning-chip: #fab219;
+    --status-critical: #d03b3b;
+    --status-muted:    #898781;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page:            #0d0d0d;
+      --surface-1:       #1a1a19;
+      --text-primary:    #ffffff;
+      --text-secondary:  #c3c2b7;
+      --text-muted:      #898781;
+      --gridline:        #2c2c2a;
+      --border:          rgba(255, 255, 255, 0.10);
+      --status-good:     #0ca30c;
+      --status-warning:  #fab219;
+      --status-warning-chip: #fab219;
+      --status-critical: #e66767;
+      --status-muted:    #898781;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:            #0d0d0d;
+    --surface-1:       #1a1a19;
+    --text-primary:    #ffffff;
+    --text-secondary:  #c3c2b7;
+    --text-muted:      #898781;
+    --gridline:        #2c2c2a;
+    --border:          rgba(255, 255, 255, 0.10);
+    --status-good:     #0ca30c;
+    --status-warning:  #fab219;
+    --status-warning-chip: #fab219;
+    --status-critical: #e66767;
+    --status-muted:    #898781;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  header {
+    padding: 20px 24px 4px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+  }
+  header p {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+  main {
+    padding: 16px 24px 40px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+
+  /* --- Summary strip: stat tiles --- */
+  .stat-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .stat-tile {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .stat-tile .label {
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin: 0 0 6px;
+  }
+  .stat-tile .value {
+    font-weight: 600;
+    font-size: 26px;
+    font-variant-numeric: proportional-nums;
+  }
+  .stat-tile .value small {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+
+  /* --- Layout: events (wide) + review queue (narrow) --- */
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 380px;
+    gap: 16px;
+    align-items: start;
+  }
+  @media (max-width: 980px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .card > .card-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--gridline);
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .card-header h2 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .card-header .hint {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  /* --- Events table --- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  thead th {
+    text-align: left;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-muted);
+    font-weight: 600;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--gridline);
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--gridline);
+    vertical-align: top;
+    white-space: nowrap;
+  }
+  tbody tr.event-row {
+    cursor: pointer;
+  }
+  tbody tr.event-row:hover td {
+    background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+  }
+  td.col-model { white-space: normal; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+  td.col-num { font-variant-numeric: tabular-nums; text-align: right; }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px 2px 6px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .badge.pass     { color: var(--status-good);     background: color-mix(in srgb, var(--status-good) 14%, transparent); }
+  .badge.pass .dot     { background: var(--status-good); }
+  .badge.warn     { color: var(--status-warning);  background: color-mix(in srgb, var(--status-warning-chip) 20%, transparent); }
+  .badge.warn .dot     { background: var(--status-warning-chip); }
+  .badge.block    { color: var(--status-critical); background: color-mix(in srgb, var(--status-critical) 16%, transparent); }
+  .badge.block .dot    { background: var(--status-critical); }
+  .badge.unknown  { color: var(--text-muted);      background: color-mix(in srgb, var(--text-muted) 14%, transparent); }
+  .badge.unknown .dot  { background: var(--text-muted); }
+
+  tr.row-pass  td.col-action-cell  { border-left: 3px solid var(--status-good); }
+  tr.row-warn  td.col-action-cell  { border-left: 3px solid var(--status-warning-chip); }
+  tr.row-block td.col-action-cell  { border-left: 3px solid var(--status-critical); }
+  tr.row-unknown td.col-action-cell{ border-left: 3px solid var(--text-muted); }
+
+  .expand-row td {
+    background: color-mix(in srgb, var(--text-primary) 3%, var(--surface-1));
+    padding: 14px 16px 18px;
+    white-space: normal;
+  }
+  .expand-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+  }
+  .expand-grid h4 {
+    margin: 0 0 6px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-muted);
+  }
+  pre {
+    margin: 0;
+    background: var(--page);
+    border: 1px solid var(--gridline);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 12px;
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .flag-line { font-size: 12.5px; margin: 2px 0; color: var(--text-secondary); }
+  .flag-line b { color: var(--text-primary); font-weight: 600; }
+
+  .empty {
+    padding: 24px 16px;
+    color: var(--text-muted);
+    text-align: center;
+    font-size: 13px;
+  }
+
+  /* --- Review queue panel --- */
+  .rq-list {
+    max-height: 720px;
+    overflow-y: auto;
+  }
+  .rq-item {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--gridline);
+  }
+  .rq-item:last-child { border-bottom: none; }
+  .rq-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .rq-detector {
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .rq-time { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+  .rq-reason {
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    margin: 4px 0 8px;
+    word-break: break-word;
+  }
+  .rq-note-input {
+    width: 100%;
+    font: inherit;
+    font-size: 12.5px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--gridline);
+    background: var(--page);
+    color: var(--text-primary);
+    margin-bottom: 8px;
+  }
+  .rq-actions { display: flex; gap: 8px; }
+  .btn {
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    background: var(--surface-1);
+    color: var(--text-primary);
+  }
+  .btn.confirm { color: var(--status-critical); border-color: color-mix(in srgb, var(--status-critical) 40%, var(--border)); }
+  .btn.dismiss { color: var(--text-secondary); }
+  .btn:hover { filter: brightness(0.97); }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+
+  a.silent { color: inherit; text-decoration: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>controlplane-checker</h1>
+  <p>Live pipeline activity — polling every 2s.</p>
+</header>
+
+<main>
+  <section class="stat-strip" id="stat-strip" aria-label="Summary"></section>
+
+  <div class="layout">
+    <section class="card" aria-label="Events">
+      <div class="card-header">
+        <h2>Recent events</h2>
+        <span class="hint" id="events-hint">last 50</span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Model</th>
+              <th class="col-num">Latency</th>
+              <th class="col-num">Cost</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="events-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" aria-label="Review queue">
+      <div class="card-header">
+        <h2>Review queue</h2>
+        <span class="hint" id="rq-hint">0 pending</span>
+      </div>
+      <div class="rq-list" id="rq-list"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+const POLL_MS = 2000;
+let expandedEventId = null;
+const noteDrafts = Object.create(null); // review_id -> in-progress note text, survives re-renders
+
+function escapeHtml(value) {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatTime(iso) {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return escapeHtml(iso);
+  return d.toLocaleTimeString(undefined, { hour12: false }) ;
+}
+
+function formatCost(usd) {
+  if (usd === null || usd === undefined) return "-";
+  return "$" + Number(usd).toFixed(6);
+}
+
+function formatMs(ms) {
+  if (ms === null || ms === undefined) return "-";
+  return Number(ms).toFixed(0) + " ms";
+}
+
+function actionBadgeClass(action) {
+  switch (action) {
+    case "pass": return "pass";
+    case "edited":
+    case "flagged": return "warn";
+    case "blocked": return "block";
+    default: return "unknown";
+  }
+}
+function rowClass(action) {
+  switch (action) {
+    case "pass": return "row-pass";
+    case "edited":
+    case "flagged": return "row-warn";
+    case "blocked": return "row-block";
+    default: return "row-unknown";
+  }
+}
+
+function renderBadge(action, status) {
+  const label = action ? action : (status === "error" ? "error" : "-");
+  const cls = actionBadgeClass(action);
+  return `<span class="badge ${cls}"><span class="dot"></span>${escapeHtml(label)}</span>`;
+}
+
+function prettyJson(value) {
+  if (value === null || value === undefined) return "null";
+  try {
+    return escapeHtml(JSON.stringify(value, null, 2));
+  } catch (e) {
+    return escapeHtml(String(value));
+  }
+}
+
+function flagLine(label, obj) {
+  if (!obj) return "";
+  const parts = Object.entries(obj).map(([k, v]) => {
+    if (v === null || v === undefined || v === "") return null;
+    if (Array.isArray(v)) v = v.length ? v.join(", ") : null;
+    if (v === null) return null;
+    return `${escapeHtml(k)}=${escapeHtml(v)}`;
+  }).filter(Boolean);
+  if (!parts.length) return "";
+  return `<div class="flag-line"><b>${escapeHtml(label)}:</b> ${parts.join(" · ")}</div>`;
+}
+
+// ---------------------------------------------------------------- Summary
+
+async function pollSummary() {
+  try {
+    const res = await fetch("/summary");
+    if (!res.ok) return;
+    const s = await res.json();
+    renderSummary(s);
+  } catch (e) { /* transient network blip — next tick retries */ }
+}
+
+function renderSummary(s) {
+  const tiles = [
+    { label: "Requests per minute", value: String(s.requests_per_minute) },
+    { label: "Avg latency", value: formatMs(s.avg_latency_ms) },
+    { label: "Total cost (last hour)", value: formatCost(s.total_cost_usd_last_hour) },
+    { label: "Flagged (last hour)", value: s.pct_flagged_last_hour.toFixed(1) + "%" },
+    { label: "Pending review", value: String(s.pending_review_count) },
+  ];
+  document.getElementById("stat-strip").innerHTML = tiles.map(t => `
+    <div class="stat-tile">
+      <p class="label">${escapeHtml(t.label)}</p>
+      <div class="value">${escapeHtml(t.value)}</div>
+    </div>
+  `).join("");
+}
+
+// ----------------------------------------------------------------- Events
+
+async function pollEvents() {
+  try {
+    const res = await fetch("/events?limit=50");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderEvents(data.items || []);
+  } catch (e) { /* transient network blip — next tick retries */ }
+}
+
+function renderEvents(items) {
+  document.getElementById("events-hint").textContent = `last ${items.length}`;
+  const body = document.getElementById("events-body");
+
+  if (!items.length) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">No events yet — send a request to /v1/chat.</td></tr>`;
+    return;
+  }
+
+  body.innerHTML = items.map(ev => {
+    const cls = rowClass(ev.controlplane && ev.controlplane.action);
+    const isExpanded = expandedEventId === ev.id;
+    const rows = [`
+      <tr class="event-row ${cls}" data-id="${ev.id}">
+        <td>${escapeHtml(formatTime(ev.timestamp))}</td>
+        <td class="col-model">${escapeHtml(ev.model)}</td>
+        <td class="col-num">${escapeHtml(formatMs(ev.latency_ms))}</td>
+        <td class="col-num">${escapeHtml(formatCost(ev.cost && ev.cost.usd))}</td>
+        <td class="col-action-cell">${renderBadge(ev.controlplane && ev.controlplane.action, ev.status)}</td>
+      </tr>
+    `];
+    if (isExpanded) {
+      rows.push(`
+        <tr class="expand-row">
+          <td colspan="5">
+            <div class="expand-grid">
+              <div>
+                <h4>Input</h4>
+                <pre>${prettyJson(ev.input)}</pre>
+              </div>
+              <div>
+                <h4>Output</h4>
+                <pre>${prettyJson(ev.output)}</pre>
+              </div>
+              <div>
+                <h4>Flags &amp; scores</h4>
+                ${flagLine("cost", ev.cost)}
+                ${flagLine("responsibility", ev.responsibility)}
+                ${flagLine("performance", ev.performance)}
+                ${flagLine("controlplane", ev.controlplane)}
+                ${ev.error ? `<div class="flag-line"><b>error:</b> ${escapeHtml(ev.error)}</div>` : ""}
+                <div class="flag-line"><b>request_id:</b> ${escapeHtml(ev.request_id || "-")}</div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      `);
+    }
+    return rows.join("");
+  }).join("");
+}
+
+document.getElementById("events-body").addEventListener("click", (e) => {
+  const row = e.target.closest("tr.event-row");
+  if (!row) return;
+  const id = Number(row.getAttribute("data-id"));
+  expandedEventId = expandedEventId === id ? null : id;
+  // Re-render immediately from the last-fetched data rather than waiting
+  // for the next poll tick, so expand/collapse feels instant.
+  pollEvents();
+});
+
+// ------------------------------------------------------------ Review queue
+
+async function pollReviewQueue() {
+  try {
+    const res = await fetch("/review-queue");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderReviewQueue(data.items || []);
+  } catch (e) { /* transient network blip — next tick retries */ }
+}
+
+function renderReviewQueue(items) {
+  document.getElementById("rq-hint").textContent = `${items.length} pending`;
+  const list = document.getElementById("rq-list");
+
+  if (!items.length) {
+    list.innerHTML = `<div class="empty">Nothing pending review.</div>`;
+    return;
+  }
+
+  list.innerHTML = items.map(item => {
+    const draft = noteDrafts[item.review_id] || "";
+    return `
+      <div class="rq-item" data-review-id="${item.review_id}">
+        <div class="rq-top">
+          <span class="rq-detector">${escapeHtml(item.detector)} · ${escapeHtml(item.severity)}</span>
+          <span class="rq-time">${escapeHtml(formatTime(item.created_at))}</span>
+        </div>
+        <div class="rq-reason">${escapeHtml(item.reason)}</div>
+        <input class="rq-note-input" type="text" placeholder="Note (optional)" value="${escapeHtml(draft)}" />
+        <div class="rq-actions">
+          <button class="btn confirm" data-action="confirmed_issue">Confirm</button>
+          <button class="btn dismiss" data-action="false_positive">Dismiss</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+document.getElementById("rq-list").addEventListener("input", (e) => {
+  const item = e.target.closest(".rq-item");
+  if (!item || !e.target.classList.contains("rq-note-input")) return;
+  const id = item.getAttribute("data-review-id");
+  noteDrafts[id] = e.target.value;
+});
+
+document.getElementById("rq-list").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-action]");
+  if (!btn) return;
+  const item = btn.closest(".rq-item");
+  const reviewId = item.getAttribute("data-review-id");
+  const resolution = btn.getAttribute("data-action");
+  const note = (noteDrafts[reviewId] || "").trim();
+
+  item.querySelectorAll("button").forEach(b => b.disabled = true);
+  try {
+    const res = await fetch(`/review-queue/${reviewId}/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resolution, note }),
+    });
+    if (!res.ok) {
+      console.error("resolve failed", res.status, await res.text());
+      item.querySelectorAll("button").forEach(b => b.disabled = false);
+      return;
+    }
+    delete noteDrafts[reviewId];
+    await Promise.all([pollReviewQueue(), pollSummary()]);
+  } catch (err) {
+    console.error("resolve error", err);
+    item.querySelectorAll("button").forEach(b => b.disabled = false);
+  }
+});
+
+// ---------------------------------------------------------------- Polling
+
+function pollAll() {
+  pollSummary();
+  pollEvents();
+  pollReviewQueue();
+}
+
+pollAll();
+setInterval(pollAll, POLL_MS);
+</script>
+</body>
+</html>
