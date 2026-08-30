@@ -34,11 +34,14 @@ got scheduled (`performance.sampled=true`) are compared against requests
 that weren't, to confirm the client-observed latency is NOT elevated for
 sampled requests. If the slow check were (incorrectly) awaited inline
 instead of run as a background task, this comparison would show it clearly.
+The same comparison is repeated for the bias detector's slow tier
+(`bias.sampled=true`), since it uses the identical background-task
+mechanism.
 
 Usage:
     python scripts/latency_test.py
     python scripts/latency_test.py --url http://127.0.0.1:8000 -n 100
-    python scripts/latency_test.py --model llama-3.1-8b-instant --max-tokens 100
+    python scripts/latency_test.py --model openai/gpt-oss-20b --max-tokens 100
 
 Requires a running instance of the service (`uvicorn app.main:app`) with a
 valid GROQ_API_KEY — these are real model-latency numbers against the real
@@ -243,21 +246,25 @@ async def main_async(args: argparse.Namespace) -> int:
     event_ids = {r.event_id for r in http_responses if r.event_id is not None}
     events_by_id = await fetch_events_by_id(args.url, event_ids, page_limit=max(args.n * 2, 200))
 
-    paired: list[tuple[float, float, bool]] = []  # (endpoint_ms, model_ms, sampled)
+    paired: list[tuple[float, float, bool, bool]] = []  # (endpoint_ms, model_ms, perf_sampled, bias_sampled)
     for r in http_responses:
         if r.event_id is None:
             continue
         ev = events_by_id.get(r.event_id)
         if ev is None:
             continue
-        paired.append((r.elapsed_ms, ev["latency_ms"], ev["performance"]["sampled"]))
+        paired.append((
+            r.elapsed_ms, ev["latency_ms"],
+            ev["performance"]["sampled"],
+            ev["bias"]["sampled"],
+        ))
 
     matched_n = len(paired)
     print(f"Correlated {matched_n}/{len(http_responses)} responses to their logged events "
           f"(event_id -> proxy-recorded model latency).\n")
 
-    model_latencies = [m for _, m, _ in paired]
-    deltas = [e - m for e, m, _ in paired]
+    model_latencies = [m for _, m, _, _ in paired]
+    deltas = [e - m for e, m, _, _ in paired]
 
     # --- Main comparison table ------------------------------------------------
     print("--- Latency comparison (ms) ---")
@@ -311,25 +318,29 @@ async def main_async(args: argparse.Namespace) -> int:
         print()
 
     # --- Empirical check: sampled (slow-check-scheduled) vs not --------------
-    sampled_endpoint = [e for e, _, sampled in paired if sampled]
-    unsampled_endpoint = [e for e, _, sampled in paired if not sampled]
-    print("--- Slow-tier (judge check) non-blocking check ---")
-    print(f"  {len(sampled_endpoint)} of {matched_n} requests were sampled for the async slow "
-          f"judge check (performance.sampled=true).")
-    if sampled_endpoint and unsampled_endpoint:
-        s_p50 = percentile(sampled_endpoint, 50)
-        u_p50 = percentile(unsampled_endpoint, 50)
-        print(f"  Endpoint latency p50 — sampled: {s_p50:.2f}ms vs not sampled: {u_p50:.2f}ms")
-        if s_p50 <= u_p50 * 1.5:
-            print("  No meaningful latency penalty for sampled requests — consistent with the "
-                  "judge call running as a background task AFTER the response was already sent, "
-                  "not awaited inline.")
+    def report_sampling_check(label: str, sample_flag_name: str, flag_index: int) -> None:
+        sampled_endpoint = [e for e, _, perf_s, bias_s in paired if (perf_s if flag_index == 0 else bias_s)]
+        unsampled_endpoint = [e for e, _, perf_s, bias_s in paired if not (perf_s if flag_index == 0 else bias_s)]
+        print(f"--- {label} non-blocking check ---")
+        print(f"  {len(sampled_endpoint)} of {matched_n} requests were sampled for the async "
+              f"{sample_flag_name}.")
+        if sampled_endpoint and unsampled_endpoint:
+            s_p50 = percentile(sampled_endpoint, 50)
+            u_p50 = percentile(unsampled_endpoint, 50)
+            print(f"  Endpoint latency p50 — sampled: {s_p50:.2f}ms vs not sampled: {u_p50:.2f}ms")
+            if s_p50 <= u_p50 * 1.5:
+                print("  No meaningful latency penalty for sampled requests — consistent with the "
+                      "check running as a background task AFTER the response was already sent, "
+                      "not awaited inline.")
+            else:
+                print("  Sampled requests are notably slower — investigate whether the slow check "
+                      "is actually running inline instead of as a background task.")
         else:
-            print("  Sampled requests are notably slower — investigate whether the slow check "
-                  "is actually running inline instead of as a background task.")
-    else:
-        print("  Not enough of both groups in this run to compare (try a larger -n).")
-    print()
+            print("  Not enough of both groups in this run to compare (try a larger -n).")
+        print()
+
+    report_sampling_check("Slow-tier (judge check)", "judge check (performance.sampled=true)", 0)
+    report_sampling_check("Bias slow-tier (judge check)", "bias judge check (bias.sampled=true)", 1)
 
     return 0
 

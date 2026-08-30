@@ -23,17 +23,17 @@ from datetime import datetime, timedelta, timezone
 
 # USD per 1,000,000 tokens. Unknown models fall back to DEFAULT_PRICE so cost
 # tracking never silently breaks when a new model shows up in requests.
+# Pulled from GET https://api.groq.com/openai/v1/models pricing (per-token
+# figures there, multiplied by 1e6 here) — Groq's model lineup rotates, so
+# re-check that endpoint if requests start 404ing with "model not found".
 PRICE_TABLE_PER_MTOK: dict[str, dict[str, float]] = {
-    "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
-    "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},
-    "llama-3.1-70b-versatile": {"input": 0.59, "output": 0.79},
-    "meta-llama/llama-4-scout-17b-16e-instruct": {"input": 0.11, "output": 0.34},
-    "meta-llama/llama-4-maverick-17b-128e-instruct": {"input": 0.20, "output": 0.60},
-    "mixtral-8x7b-32768": {"input": 0.24, "output": 0.24},
-    "gemma2-9b-it": {"input": 0.20, "output": 0.20},
-    "deepseek-r1-distill-llama-70b": {"input": 0.75, "output": 0.99},
+    "openai/gpt-oss-120b": {"input": 0.15, "output": 0.60},
+    "openai/gpt-oss-20b": {"input": 0.075, "output": 0.30},
+    "openai/gpt-oss-safeguard-20b": {"input": 0.075, "output": 0.30},
+    "qwen/qwen3.8-27b": {"input": 0.80, "output": 4.00},
+    "qwen/qwen3.6-27b": {"input": 0.60, "output": 3.00},
 }
-DEFAULT_PRICE = {"input": 0.59, "output": 0.79}  # conservative fallback for unlisted models
+DEFAULT_PRICE = {"input": 0.60, "output": 3.00}  # conservative fallback for unlisted models
 
 ROLLING_WINDOW = 100  # most recent successful events considered for the baseline
 Z_SCORE_THRESHOLD = 2.5

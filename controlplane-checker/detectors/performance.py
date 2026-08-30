@@ -30,7 +30,7 @@ from dataclasses import asdict, dataclass
 
 # Deliberately a small/cheap model — the judge must be cheaper and faster
 # than whatever generated the response it's grading, not a bigger model.
-JUDGE_MODEL = "llama-3.1-8b-instant"
+JUDGE_MODEL = "openai/gpt-oss-20b"
 JUDGE_MAX_TOKENS = 120
 
 SLOW_CHECK_SAMPLE_RATE = 0.10  # random background-check rate for *unflagged* responses
@@ -104,10 +104,15 @@ def fast_heuristic(text: str) -> FastHeuristicResult:
     return FastHeuristicResult(flagged=False, reason="hedged, or no specific factual claims found")
 
 
-def should_run_slow_check(fast_result: FastHeuristicResult, rand: float) -> bool:
+def should_run_slow_check(
+    fast_result: FastHeuristicResult, rand: float, sample_rate: float = SLOW_CHECK_SAMPLE_RATE
+) -> bool:
     """`rand` is injected (rather than calling random.random() internally)
-    so this decision is trivially unit-testable."""
-    return fast_result.flagged or rand < SLOW_CHECK_SAMPLE_RATE
+    so this decision is trivially unit-testable. `sample_rate` defaults to
+    this module's constant but is normally threaded in from the resolved
+    per-use-case Policy (policy.py) so customer-facing traffic can sample
+    more aggressively than batch traffic."""
+    return fast_result.flagged or rand < sample_rate
 
 
 # --- Tier 2: slow judge check (background task only) -------------------------
@@ -131,6 +136,43 @@ _REASON_REGEX = re.compile(r"REASON:\s*(.+)", re.IGNORECASE)
 
 def build_judge_prompt(question: str, answer: str) -> str:
     return _JUDGE_PROMPT_TEMPLATE.format(question=question or "(no question given)", answer=answer)
+
+
+# --- Tier 2, grounded variant: retrieval-grounded hallucination checking -----
+#
+# Used instead of the plausibility-only prompt above when the caller supplies
+# `context_documents` on POST /v1/chat (an optional field — no document
+# store/retrieval step lives in this service; the caller supplies the source
+# material per-request). Same judge model, same background-task mechanism,
+# same SCORE:/REASON: response contract — parse_judge_response is reused
+# unchanged. Only the question being asked of the judge differs: "is this
+# supported by these specific documents" instead of "is this plausible."
+
+_GROUNDED_JUDGE_PROMPT_TEMPLATE = """You are a fact-checking judge verifying an answer against specific \
+source material. Given the question, the reference documents, and the answer below, decide whether the \
+answer is well-supported by the documents — flag anything unsupported, contradicted, or fabricated \
+relative to what the documents actually say.
+
+Question: {question}
+
+Reference documents:
+{documents}
+
+Answer: {answer}
+
+Respond in exactly this format and nothing else:
+SCORE: <a number between 0 and 1, where 1 means the answer contains claims unsupported or contradicted \
+by the reference documents>
+REASON: <one sentence explaining the score, citing what the documents do or don't support>"""
+
+
+def build_grounded_judge_prompt(question: str, answer: str, documents: list[str]) -> str:
+    joined_documents = "\n".join(f"- {doc}" for doc in documents) if documents else "(none provided)"
+    return _GROUNDED_JUDGE_PROMPT_TEMPLATE.format(
+        question=question or "(no question given)",
+        documents=joined_documents,
+        answer=answer,
+    )
 
 
 def parse_judge_response(text: str) -> tuple[float | None, str]:

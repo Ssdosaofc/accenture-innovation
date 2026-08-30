@@ -1,0 +1,30 @@
+{
+  "_comment": "Per-use-case risk-tolerance/latency-budget profiles. 'internal' is set to exactly match the pre-policy-layer hardcoded constants (decision_engine.BLOCK_Z_SCORE/FLAG_Z_SCORE, detectors.performance.REVIEW_THRESHOLD/SLOW_CHECK_SAMPLE_RATE) so it is a behavior-preserving default. Edit this file to retune a tier without touching Python or redeploying code.",
+  "default_use_case": "internal",
+  "policies": {
+    "customer_facing": {
+      "_comment": "Stricter: lower tolerance for cost anomalies, more slow-check sampling, lower review thresholds. Fits a live, user-facing chatbot where a bad response is seen immediately.",
+      "block_z_score": 3.0,
+      "flag_z_score": 2.0,
+      "review_threshold": 0.4,
+      "slow_check_sample_rate": 0.25,
+      "bias_review_threshold": 0.3
+    },
+    "internal": {
+      "_comment": "Baseline tier — identical to the original hardcoded defaults. Fits an internal copilot where reviewers are already in the loop.",
+      "block_z_score": 4.0,
+      "flag_z_score": 2.5,
+      "review_threshold": 0.6,
+      "slow_check_sample_rate": 0.10,
+      "bias_review_threshold": 0.6
+    },
+    "batch": {
+      "_comment": "Most lenient: batch/offline workloads tolerate more cost variance and don't need heavy live sampling, since output is reviewed downstream anyway.",
+      "block_z_score": 6.0,
+      "flag_z_score": 4.0,
+      "review_threshold": 0.8,
+      "slow_check_sample_rate": 0.02,
+      "bias_review_threshold": 0.8
+    }
+  }
+}

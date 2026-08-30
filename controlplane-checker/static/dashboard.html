@@ -239,6 +239,27 @@
     font-size: 13px;
   }
 
+  /* --- Feedback loop panel --- */
+  .fb-warning {
+    margin: 12px 16px 0;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 12.5px;
+    color: var(--status-warning);
+    background: color-mix(in srgb, var(--status-warning-chip) 16%, transparent);
+  }
+  .fb-warning + .fb-warning { margin-top: 6px; }
+
+  /* --- Policy suggestions --- */
+  .suggestion-row {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--gridline);
+    font-size: 12.5px;
+  }
+  .suggestion-row:last-child { border-bottom: none; }
+  .suggestion-row .headline { color: var(--text-primary); font-weight: 600; }
+  .suggestion-row .reason { color: var(--text-secondary); margin-top: 2px; }
+
   /* --- Review queue panel --- */
   .rq-list {
     max-height: 720px;
@@ -337,6 +358,16 @@
       <div class="rq-list" id="rq-list"></div>
     </section>
   </div>
+
+  <section class="card" aria-label="Feedback loop" style="margin-top:16px;">
+    <div class="card-header">
+      <h2>Feedback loop — confirmed vs. false-positive rate</h2>
+      <span class="hint" id="audit-badge-slot"></span>
+    </div>
+    <div id="feedback-warnings"></div>
+    <div class="stat-strip" id="feedback-stats" style="padding:14px 16px; margin-bottom:0;"></div>
+    <div id="policy-suggestions" style="padding:0 16px 14px;"></div>
+  </section>
 </main>
 
 <script>
@@ -496,8 +527,12 @@ function renderEvents(items) {
                 ${flagLine("cost", ev.cost)}
                 ${flagLine("responsibility", ev.responsibility)}
                 ${flagLine("performance", ev.performance)}
+                ${flagLine("bias", ev.bias)}
+                ${flagLine("session", ev.session)}
                 ${flagLine("controlplane", ev.controlplane)}
+                ${flagLine("policy", ev.policy)}
                 ${ev.error ? `<div class="flag-line"><b>error:</b> ${escapeHtml(ev.error)}</div>` : ""}
+                <div class="flag-line"><b>use_case:</b> ${escapeHtml(ev.use_case || "unknown")}</div>
                 <div class="flag-line"><b>request_id:</b> ${escapeHtml(ev.request_id || "-")}</div>
               </div>
             </div>
@@ -593,12 +628,104 @@ document.getElementById("rq-list").addEventListener("click", async (e) => {
   }
 });
 
+// -------------------------------------------------------------- Feedback
+
+async function pollFeedbackStats() {
+  try {
+    const res = await fetch("/feedback/stats");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderFeedbackStats(data);
+  } catch (e) { /* transient network blip — next tick retries */ }
+}
+
+function renderFeedbackStats(data) {
+  const detectors = data.detectors || {};
+  const order = ["cost", "responsibility", "performance", "bias"];
+  const tiles = order.map(name => {
+    const s = detectors[name] || {};
+    const rate = s.confirmed_rate === null || s.confirmed_rate === undefined
+      ? "n/a"
+      : (s.confirmed_rate * 100).toFixed(0) + "%";
+    const n = s.total_resolved || 0;
+    return `
+      <div class="stat-tile">
+        <p class="label">${escapeHtml(name)}</p>
+        <div class="value">${rate} <small>confirmed (n=${n})</small></div>
+      </div>
+    `;
+  }).join("");
+  document.getElementById("feedback-stats").innerHTML = tiles;
+
+  const warnings = data.warnings || [];
+  document.getElementById("feedback-warnings").innerHTML = warnings.map(w => {
+    const text = typeof w === "string" ? w : JSON.stringify(w);
+    return `<div class="fb-warning">${escapeHtml(text)}</div>`;
+  }).join("");
+}
+
+// ------------------------------------------------------------- Audit trail
+
+async function pollAuditVerify() {
+  try {
+    const res = await fetch("/audit/verify");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderAuditBadge(data);
+  } catch (e) { /* transient network blip — next tick retries */ }
+}
+
+function renderAuditBadge(data) {
+  const slot = document.getElementById("audit-badge-slot");
+  if (data.valid) {
+    slot.innerHTML = `<span class="badge pass"><span class="dot"></span>audit chain valid (${data.checked})</span>`;
+  } else {
+    slot.innerHTML = `<span class="badge block"><span class="dot"></span>audit chain broken at #${escapeHtml(data.first_break_id)}</span>`;
+  }
+}
+
+// -------------------------------------------------------- Policy suggestions
+
+async function pollPolicySuggestions() {
+  try {
+    const res = await fetch("/policy/suggestions");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderPolicySuggestions(data);
+  } catch (e) { /* transient network blip — next tick retries */ }
+}
+
+function renderPolicySuggestions(data) {
+  const suggestions = data.suggestions || [];
+  const container = document.getElementById("policy-suggestions");
+  if (!suggestions.length) {
+    container.innerHTML = "";
+    return;
+  }
+  const rows = suggestions.map(s => `
+    <div class="suggestion-row">
+      <div class="headline">${escapeHtml(s.detector)} / ${escapeHtml(s.use_case)}: ${escapeHtml(s.field)}
+        ${s.current_value} &rarr; ${s.suggested_value}
+        <small style="color:var(--text-muted); font-weight:500;">(fp_rate=${(s.false_positive_rate*100).toFixed(0)}%, n=${s.n})</small>
+      </div>
+      <div class="reason">${escapeHtml(s.reason)}</div>
+    </div>
+  `).join("");
+  container.innerHTML = `
+    <h4 style="margin:10px 0 4px; font-size:11px; text-transform:uppercase; letter-spacing:0.03em; color:var(--text-muted);">Policy tuning suggestions (edit config/policies.json and restart to apply — nothing here is automatic)</h4>
+    ${rows}
+  `;
+}
+
 // ---------------------------------------------------------------- Polling
 
 function pollAll() {
   pollSummary();
   pollEvents();
   pollReviewQueue();
+  pollFeedbackStats();
+  pollAuditVerify();
+  pollPolicySuggestions();
 }
 
 pollAll();

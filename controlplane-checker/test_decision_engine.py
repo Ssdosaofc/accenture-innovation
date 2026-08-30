@@ -40,9 +40,13 @@ from app.db import init_db  # noqa: E402
 from detectors.performance import JUDGE_MODEL  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "openai/gpt-oss-120b"
 
 init_db()
+# This script drives main_module.app directly via TestClient without using
+# it as a context manager, so FastAPI's lifespan (where POLICIES normally
+# gets loaded) never runs — load it explicitly here instead.
+main_module.POLICIES, main_module.DEFAULT_USE_CASE = main_module.load_policies()
 
 # --- Mocked Groq client ------------------------------------------------
 #
@@ -217,6 +221,19 @@ injection_scenarios = make_scenarios(
     ],
 )
 
+# Fast-tier bias matches (detectors/bias_patterns.py) — decision_engine
+# should FLAG these via bias_flag, mirroring the pii/injection categories
+# above but proving the pattern generalizes to a 4th detector.
+bias_scenarios = make_scenarios(
+    "bias",
+    [
+        ("What do you think about women in engineering roles?",
+         "All women are bad at engineering, everyone knows that."),
+        ("Tell me about hiring immigrants.",
+         "Immigrants don't belong in skilled jobs, it's just common sense."),
+    ],
+)
+
 # Burst: the SAME message sent 4x in a row. detectors/cost.py's retry-loop
 # check flags the 4th occurrence (RETRY_THRESHOLD=3 prior hits), but token
 # counts here are ordinary, so z_score stays low — decision_engine should
@@ -236,19 +253,22 @@ burst_scenarios = [
     for _ in range(4)
 ]
 
-baseline_scenarios = normal_scenarios + pii_scenarios + injection_scenarios + burst_scenarios
+baseline_scenarios = (
+    normal_scenarios + pii_scenarios + injection_scenarios + bias_scenarios + burst_scenarios
+)
 for i, s in enumerate(baseline_scenarios):
     s["request_id"] = f"chatcmpl-test-{i}"
 
 
-def run_scenario(scenario: dict) -> dict:
+def run_scenario(scenario: dict, use_case: str | None = None) -> dict:
     """Fire one request, return a row of results for the summary table."""
     current_scenario.clear()
     current_scenario.update(scenario)
 
-    resp = client.post(
-        "/v1/chat", json={"messages": [{"role": "user", "content": scenario["user_message"]}]}
-    )
+    body = {"messages": [{"role": "user", "content": scenario["user_message"]}]}
+    if use_case is not None:
+        body["use_case"] = use_case
+    resp = client.post("/v1/chat", json=body)
     try:
         body = resp.json()
     except Exception:
@@ -313,12 +333,57 @@ for idx, (category, target_z) in enumerate(anomaly_specs):
     results.append(run_scenario(scenario))
 
 
+# --- Policy / use_case tiering ----------------------------------------------
+#
+# Separate from the 22-scenario baseline table above: proves that the SAME
+# cost deviation gets a DIFFERENT decision-engine action depending on the
+# resolved Policy's flag_z_score (config/policies.json) — the concrete
+# evidence that "one-size-fits-all doesn't work" (Round 2 PDF's #1-listed
+# real-world complexity). customer_facing's flag_z_score=2.0 is stricter
+# than internal's 2.5; a deviation engineered at z~2.2 should pass under
+# internal but flag under customer_facing.
+#
+# Each target is computed FRESH immediately before its own request (via
+# tokens_for_z(), which re-queries the live baseline) since firing the
+# first tiered request itself joins the shared per-model baseline and would
+# shift the z-score computed for a second, later request reusing a stale
+# target.
+
+prompt_tokens, completion_tokens = tokens_for_z(2.2)
+tiering_internal_scenario = {
+    "category": "tiering_internal",
+    "user_message": "Give me a moderately detailed answer for the internal tier.",
+    "response_content": "Here is a moderately detailed answer.",
+    "prompt_tokens": prompt_tokens,
+    "completion_tokens": completion_tokens,
+    "request_id": "chatcmpl-tiering-internal",
+}
+tiering_internal_result = run_scenario(tiering_internal_scenario, use_case="internal")
+
+prompt_tokens, completion_tokens = tokens_for_z(2.2)
+tiering_customer_scenario = {
+    "category": "tiering_customer_facing",
+    "user_message": "Give me a moderately detailed answer for the customer-facing tier.",
+    "response_content": "Here is a moderately detailed answer.",
+    "prompt_tokens": prompt_tokens,
+    "completion_tokens": completion_tokens,
+    "request_id": "chatcmpl-tiering-customer",
+}
+tiering_customer_result = run_scenario(tiering_customer_scenario, use_case="customer_facing")
+
+tiering_mismatches = 0
+if tiering_internal_result["action"] != "pass":
+    tiering_mismatches += 1
+if tiering_customer_result["action"] != "flagged":
+    tiering_mismatches += 1
+
 # --- Print the table --------------------------------------------------------
 
 EXPECTED_ACTION = {
     "normal": "pass",
     "pii": "edited",
     "injection": "flagged",
+    "bias": "flagged",
     "retry_burst": "pass",
     "moderate_cost": "flagged",
     "extreme_cost": "blocked",
@@ -380,9 +445,24 @@ for i, r in enumerate(results, start=1):
             f"cost_z={r['cost_z']:.2f} action(decision-engine)={r['action']}"
         )
 
-if mismatches:
+print()
+print("Policy / use_case tiering (config/policies.json) — same z~2.2 cost deviation,")
+print("different resolved threshold per use_case:")
+print(
+    f"  internal          (flag_z=2.5): action={tiering_internal_result['action']!r:<10} "
+    f"cost_z={tiering_internal_result['cost_z']:.2f}  expected='pass'"
+)
+print(
+    f"  customer_facing   (flag_z=2.0): action={tiering_customer_result['action']!r:<10} "
+    f"cost_z={tiering_customer_result['cost_z']:.2f}  expected='flagged'"
+)
+if tiering_mismatches:
+    print(f"  WARNING: {tiering_mismatches} tiering scenario(s) did not get the expected action.")
+
+total_mismatches = mismatches + tiering_mismatches
+if total_mismatches:
     print()
-    print(f"WARNING: {mismatches} scenario(s) did not get the expected action — see MISMATCH rows above.")
+    print(f"WARNING: {total_mismatches} scenario(s) did not get the expected action — see rows/warnings above.")
 else:
     print()
-    print("All 20 scenarios got the expected decision_engine action.")
+    print(f"All {len(results)} baseline scenarios + 2 policy-tiering scenarios got the expected decision_engine action.")
